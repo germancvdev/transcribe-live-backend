@@ -4,6 +4,7 @@ import json
 import logging
 
 from fastapi import FastAPI, WebSocket
+from google.genai import errors as genai_errors
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from app.auth import authenticate
@@ -14,6 +15,10 @@ from app.gemini import (
     send_audio_stream_end,
 )
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger("transcribe-live-backend")
 
 app = FastAPI()
@@ -49,20 +54,24 @@ async def live_translate(websocket: WebSocket):
                     pass
     except WebSocketDisconnect:
         pass
+    except genai_errors.APIError as err:
+        logger.exception("Gemini Live API rejected the session: %s", err)
+        await _send_error(websocket, f"Gemini rejected the connection: {err.message or err}")
     except Exception:
-        logger.exception("live_translate session failed")
-        if websocket.client_state == WebSocketState.CONNECTED:
-            try:
-                await websocket.send_text(
-                    json.dumps(
-                        {"type": "error", "message": "Could not connect to Gemini."}
-                    )
-                )
-            except Exception:
-                pass
+        logger.exception("live_translate session failed with an unexpected error")
+        await _send_error(websocket, "Unexpected server error.")
     finally:
         if websocket.client_state == WebSocketState.CONNECTED:
             await websocket.close()
+
+
+async def _send_error(websocket: WebSocket, message: str) -> None:
+    if websocket.client_state != WebSocketState.CONNECTED:
+        return
+    try:
+        await websocket.send_text(json.dumps({"type": "error", "message": message}))
+    except Exception:
+        logger.exception("Failed to deliver error message to client")
 
 
 async def _pump_client_audio(websocket: WebSocket, session) -> None:
